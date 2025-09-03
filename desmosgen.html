@@ -1,0 +1,367 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Desmos Trace Helper — Image → Desmos equations</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; padding: 16px; }
+  #canvasWrap { display:flex; gap:16px; align-items:flex-start; }
+  canvas { border:1px solid #bbb; image-rendering: pixelated; }
+  .controls { max-width:420px; }
+  label{ display:block; margin-top:8px;}
+  textarea { width:100%; height:240px; font-family: monospace; }
+  .btn { margin-top:8px; padding:8px 12px; cursor:pointer; }
+  .hint { color:#555; font-size:0.9em; margin-top:6px; }
+</style>
+</head>
+<body>
+<h2>Desmos Trace Helper — image → Desmos parametric segments</h2>
+<p>Upload an image, tweak threshold & simplification, then copy the generated Desmos equations into Desmos. Each polyline segment becomes a parametric line (x(t), y(t)) with t in [0,1].</p>
+
+<div id="canvasWrap">
+  <div>
+    <canvas id="src" width=480 height=640></canvas><br>
+    <canvas id="edges" width=480 height=640></canvas>
+  </div>
+
+  <div class="controls">
+    <label>Image: <input id="file" type="file" accept="image/*"></label>
+    <label>Blur (box radius): <input id="blur" type="range" min="0" max="4" value="1"> <span id="blurVal">1</span></label>
+    <label>Edge threshold (0-255): <input id="thresh" type="range" min="10" max="200" value="60"> <span id="threshVal">60</span></label>
+    <label>Simplify tolerance (px): <input id="tol" type="range" min="0" max="8" value="2" step="0.5"> <span id="tolVal">2</span></label>
+    <label>Output scale (Desmos units per canvas px): <input id="scale" type="number" step="0.01" value="0.15"> </label>
+    <label>Output center (Desmos x,y): <input id="cx" type="number" value="0"> , <input id="cy" type="number" value="0"></label>
+
+    <button id="process" class="btn">Extract contours → generate Desmos</button>
+    <button id="download" class="btn">Download SVG of contours</button>
+    <div class="hint">Tip: set scale so the figure fits Desmos (try 0.12–0.25). Use simplify to reduce equations.</div>
+
+    <h3>Desmos output (copy to Desmos)</h3>
+    <textarea id="out" placeholder="Press 'Extract' to generate equations..."></textarea>
+  </div>
+</div>
+
+<script>
+// --- Utility functions ---
+// convolution helper
+function convolve(px, w, h, kernel, kw, kh) {
+  const out = new Float32Array(w*h);
+  const kcx = Math.floor(kw/2), kcy = Math.floor(kh/2);
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      let sum=0;
+      for (let ky=0; ky<kh; ky++){
+        for (let kx=0; kx<kw; kx++){
+          const sx = x + (kx - kcx);
+          const sy = y + (ky - kcy);
+          if (sx<0||sy<0||sx>=w||sy>=h) continue;
+          sum += px[sy*w+sx] * kernel[ky*kw+kx];
+        }
+      }
+      out[y*w+x]=sum;
+    }
+  }
+  return out;
+}
+
+// grayscale
+function grayscale(imgd, w, h) {
+  const d = imgd.data;
+  const g = new Float32Array(w*h);
+  for (let i=0, p=0;i<d.length;i+=4, p++){
+    // luminance
+    g[p] = 0.2126*d[i] + 0.7152*d[i+1] + 0.0722*d[i+2];
+  }
+  return g;
+}
+
+// box blur radius n
+function boxBlur(g, w, h, n) {
+  if(n<=0) return g;
+  let cur = g;
+  for (let r=0;r<n;r++){
+    cur = convolve(cur, w, h, new Float32Array([1/9,1/9,1/9,1/9,1/9,1/9,1/9,1/9,1/9]), 3,3);
+  }
+  return cur;
+}
+
+// simple sobel magnitude
+function sobelMag(g,w,h) {
+  const kx = Float32Array.from([-1,0,1,-2,0,2,-1,0,1]);
+  const ky = Float32Array.from([-1,-2,-1,0,0,0,1,2,1]);
+  const gx = convolve(g,w,h,kx,3,3);
+  const gy = convolve(g,w,h,ky,3,3);
+  const mag = new Float32Array(w*h);
+  for (let i=0;i<w*h;i++) mag[i] = Math.hypot(gx[i], gy[i]);
+  return mag;
+}
+
+// threshold -> binary
+function thresholdify(mag,w,h,th) {
+  const b = new Uint8ClampedArray(w*h);
+  for (let i=0;i<w*h;i++) b[i] = mag[i] >= th ? 1 : 0;
+  return b;
+}
+
+// marching squares -> extract contours as polylines
+function marchingSquares(binary, w, h) {
+  // naive marching squares: look for edges in 2x2 blocks, track contours
+  const visited = new Uint8Array(w*h);
+  const contours = [];
+
+  const get = (x,y) => {
+    if (x<0||y<0||x>=w||y>=h) return 0;
+    return binary[y*w+x];
+  };
+
+  // function to trace a contour starting from a boundary pixel
+  for (let y=0;y<h-1;y++){
+    for (let x=0;x<w-1;x++){
+      // check cell corners
+      const a = get(x,y), b = get(x+1,y), c = get(x+1,y+1), d = get(x,y+1);
+      if (a + b + c + d === 0) continue;
+      // if any corner nonzero and not yet consumed, attempt to follow
+      if (a || b || c || d) {
+        // trace using simple boundary following: walk around where cell transitions occur
+        if (visited[y*w+x]) continue;
+        let contour = [];
+        // start at center of cell edges - we'll sample the boundary as points around pixel grid
+        // a simple flood to collect connected boundary pixels
+        const stack = [[x,y]];
+        while (stack.length) {
+          const [sx,sy] = stack.pop();
+          if (sx<0||sy<0||sx>=w-1||sy>=h-1) continue;
+          if (visited[sy*w+sx]) continue;
+          visited[sy*w+sx]=1;
+          // add center point of this cell
+          contour.push([sx+0.5, sy+0.5]);
+          // neighbor cells if they have any foreground
+          const neigh = [[1,0],[-1,0],[0,1],[0,-1]];
+          for (const [dx,dy] of neigh){
+            const nx = sx+dx, ny = sy+dy;
+            if (nx<0||ny<0||nx>=w-1||ny>=h-1) continue;
+            if (visited[ny*w+nx]) continue;
+            const na = get(nx,ny) || get(nx+1,ny) || get(nx+1,ny+1) || get(nx,ny+1);
+            if (na) stack.push([nx,ny]);
+          }
+        }
+        if (contour.length>2) {
+          contours.push(contour);
+        }
+      }
+    }
+  }
+  return contours;
+}
+
+// Douglas-Peucker simplification
+function douglasPeucker(points, tol) {
+  if (points.length <= 2) return points.slice();
+  const sqTol = tol*tol;
+  function sqDist(a,b) {
+    const dx=a[0]-b[0], dy=a[1]-b[1]; return dx*dx+dy*dy;
+  }
+  function sqSegDist(p, a, b) {
+    let x = a[0], y=a[1], dx=b[0]-x, dy=b[1]-y;
+    if (dx===0 && dy===0) return sqDist(p,a);
+    const t = ((p[0]-x)*dx + (p[1]-y)*dy) / (dx*dx+dy*dy);
+    if (t<0) return sqDist(p,a);
+    if (t>1) return sqDist(p,b);
+    const proj = [x + t*dx, y + t*dy];
+    return sqDist(p, proj);
+  }
+
+  const keep = new Uint8Array(points.length);
+  keep[0]=1; keep[points.length-1]=1;
+
+  function rec(l,r){
+    let maxD=0, idx=-1;
+    for (let i=l+1;i<r;i++){
+      const d = sqSegDist(points[i], points[l], points[r]);
+      if (d>maxD){ maxD=d; idx=i; }
+    }
+    if (maxD > sqTol && idx!=-1){
+      keep[idx]=1;
+      rec(l, idx);
+      rec(idx, r);
+    }
+  }
+  rec(0, points.length-1);
+  const out=[];
+  for (let i=0;i<points.length;i++) if (keep[i]) out.push(points[i]);
+  return out;
+}
+
+// draw simple polyline
+function drawPolylines(ctx, contours, scale=1, color='red') {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  for (const c of contours){
+    ctx.beginPath();
+    for (let i=0;i<c.length;i++){
+      const [x,y]=c[i];
+      if (i===0) ctx.moveTo(x*scale, y*scale);
+      else ctx.lineTo(x*scale, y*scale);
+    }
+    ctx.stroke();
+  }
+}
+
+// convert contour points to Desmos parametric segments
+function contoursToDesmos(contours, opts) {
+  // opts: width,height, scale, cx, cy (Desmos center coordinates)
+  const out = [];
+  const w = opts.w, h=opts.h, scale=opts.scale;
+  for (const c of contours){
+    // ensure points are in order, and convert to pixel coords with origin at top-left
+    if (c.length < 2) continue;
+    for (let i=0;i<c.length-1;i++){
+      const p1 = c[i], p2 = c[i+1];
+      // convert to Desmos coordinates: map canvas pixel (px,py) to (X,Y) where
+      // X = (px - w/2)*scale + cx
+      // Y = (h/2 - py)*scale + cy   (flip Y because canvas y grows down)
+      const x1 = (p1[0] - w/2) * scale + opts.cx;
+      const y1 = (h/2 - p1[1]) * scale + opts.cy;
+      const x2 = (p2[0] - w/2) * scale + opts.cx;
+      const y2 = (h/2 - p2[1]) * scale + opts.cy;
+      // create parametric segment using parameter t in [0,1]
+      // Desmos parametric equation form: (x1 + (x2-x1)*t, y1 + (y2-y1)*t) {0 <= t <= 1}
+      const dx = x2 - x1, dy = y2 - y1;
+      // limit decimal places to reasonable
+      const f = n => Number(n.toFixed(4));
+      const eq = `\\left(${f(x1)} + ${f(dx)}t,\\; ${f(y1)} + ${f(dy)}t\\right) \\{0 \\le t \\le 1\\}`;
+      out.push(eq);
+    }
+  }
+  return out;
+}
+
+// --- DOM wiring ---
+const file = document.getElementById('file');
+const src = document.getElementById('src');
+const edges = document.getElementById('edges');
+const ctxSrc = src.getContext('2d');
+const ctxEdges = edges.getContext('2d');
+
+const blur = document.getElementById('blur'), blurVal = document.getElementById('blurVal');
+const thresh = document.getElementById('thresh'), threshVal = document.getElementById('threshVal');
+const tol = document.getElementById('tol'), tolVal = document.getElementById('tolVal');
+const process = document.getElementById('process');
+const out = document.getElementById('out');
+const downloadBtn = document.getElementById('download');
+
+blur.oninput = () => blurVal.textContent = blur.value;
+thresh.oninput = () => threshVal.textContent = thresh.value;
+tol.oninput = () => tolVal.textContent = tol.value;
+
+file.onchange = (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    // fit image into canvas while preserving aspect
+    const maxW = src.width, maxH = src.height;
+    let iw = img.width, ih = img.height;
+    let scaleFactor = Math.min(maxW/iw, maxH/ih);
+    const drawW = Math.round(iw * scaleFactor), drawH = Math.round(ih * scaleFactor);
+    ctxSrc.clearRect(0,0,src.width, src.height);
+    // center
+    const ox = Math.round((src.width - drawW)/2), oy = Math.round((src.height - drawH)/2);
+    ctxSrc.drawImage(img, ox, oy, drawW, drawH);
+    // keep the rest of canvas transparent/blank
+  };
+  img.src = URL.createObjectURL(f);
+};
+
+process.onclick = () => {
+  // read image data
+  const w = src.width, h = src.height;
+  const imgd = ctxSrc.getImageData(0,0,w,h);
+  let g = grayscale(imgd, w, h);
+  const b = Number(blur.value);
+  if (b>0) g = boxBlur(g, w, h, b);
+  const mag = sobelMag(g,w,h);
+
+  // normalize magnitude
+  let max=0;
+  for (let i=0;i<mag.length;i++) if (mag[i]>max) max=mag[i];
+  const norm = new Float32Array(mag.length);
+  for (let i=0;i<mag.length;i++) norm[i] = (mag[i]/max)*255;
+
+  const th = Number(thresh.value);
+  const bin = thresholdify(norm, w, h, th);
+
+  // render edges for preview
+  const outImg = ctxEdges.createImageData(w,h);
+  for (let i=0;i<bin.length;i++){
+    const v = bin[i] ? 0 : 255; // white background, black edges
+    outImg.data[i*4+0]=v; outImg.data[i*4+1]=v; outImg.data[i*4+2]=v; outImg.data[i*4+3]=255;
+  }
+  ctxEdges.putImageData(outImg, 0,0);
+
+  // extract contours (polylines)
+  let contours = marchingSquares(bin, w, h);
+  // simplify each
+  const tolPx = parseFloat(tol.value);
+  contours = contours.map(c => douglasPeucker(c, tolPx)).filter(c=>c.length>1);
+
+  // draw simplified overlay
+  ctxEdges.globalCompositeOperation='source-over';
+  ctxEdges.strokeStyle='red';
+  ctxEdges.lineWidth=1;
+  ctxEdges.clearRect(0,0,w,h);
+  // draw original edges beneath
+  const outImg2 = ctxEdges.createImageData(w,h);
+  for (let i=0;i<bin.length;i++){
+    const v = bin[i] ? 0 : 255;
+    outImg2.data[i*4+0]=v; outImg2.data[i*4+1]=v; outImg2.data[i*4+2]=v; outImg2.data[i*4+3]=255;
+  }
+  ctxEdges.putImageData(outImg2, 0,0);
+  drawPolylines(ctxEdges, contours, 1, 'red');
+
+  // convert to Desmos parametric segments
+  const scale = parseFloat(document.getElementById('scale').value);
+  const cx = parseFloat(document.getElementById('cx').value);
+  const cy = parseFloat(document.getElementById('cy').value);
+  const desmos = contoursToDesmos(contours, {w,h, scale, cx, cy});
+  // format output as numbered list
+  let txt = "// Copy these into Desmos (as parametric expressions). Each line is (x(t), y(t)) {0 ≤ t ≤ 1}\n";
+  txt += "// Tip: paste lines into Desmos as separate expressions; set t as slider if needed.\n\n";
+  for (let i=0;i<desmos.length;i++){
+    txt += desmos[i] + "\n";
+  }
+  out.value = txt;
+};
+
+downloadBtn.onclick = () => {
+  // export simplified contours as SVG for easy reference
+  const w = src.width, h = src.height;
+  // run a quick process to get contours
+  const imgd = ctxSrc.getImageData(0,0,w,h);
+  let g = grayscale(imgd, w, h);
+  const b = Number(blur.value);
+  if (b>0) g = boxBlur(g, w, h, b);
+  const mag = sobelMag(g,w,h);
+  let max=0; for (let i=0;i<mag.length;i++) if (mag[i]>max) max=mag[i];
+  const norm = new Float32Array(mag.length);
+  for (let i=0;i<mag.length;i++) norm[i] = (mag[i]/max)*255;
+  const th = Number(thresh.value);
+  const bin = thresholdify(norm, w, h, th);
+  let contours = marchingSquares(bin, w, h);
+  const tolPx = parseFloat(tol.value);
+  contours = contours.map(c => douglasPeucker(c, tolPx)).filter(c=>c.length>1);
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+  svg += `<rect width="100%" height="100%" fill="white"/>`;
+  svg += `<g fill="none" stroke="black" stroke-width="1">`;
+  for (const c of contours){
+    svg += `<path d="M ${c.map(p=>p[0]+','+p[1]).join(' L ')}" />`;
+  }
+  svg += `</g></svg>`;
+  const blob = new Blob([svg], {type:'image/svg+xml'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'contours.svg'; a.click();
+};
+</script>
+</body>
+</html>
