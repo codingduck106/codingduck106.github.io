@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inventory Request — Team 2813</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #17181a;
+    --panel: #1f2123;
+    --panel-raised: #26282b;
+    --line: #383b3e;
+    --text: #e9e6df;
+    --text-dim: #8b8d8f;
+    --accent: #ff6a1a;
+    --accent-dim: #7a3712;
+    --good: #4caf6d;
+    --bad: #e5484d;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-image:
+      repeating-linear-gradient(135deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 14px);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px 80px;
+  }
+
+  .sheet {
+    width: 100%;
+    max-width: 560px;
+  }
+
+  .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  h1 {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 700;
+    font-size: 32px;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    margin: 0 0 4px;
+  }
+
+  .subhead {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-bottom: 28px;
+    line-height: 1.5;
+  }
+
+  /* --- Label preview: the "signature" element --- */
+  .label-preview {
+    background: repeating-linear-gradient(45deg, #0f1011, #0f1011 10px, #131415 10px, #131415 20px);
+    border: 1px dashed var(--line);
+    padding: 16px 18px;
+    margin-bottom: 28px;
+    position: relative;
+  }
+  .label-preview .tag {
+    position: absolute;
+    top: -9px;
+    left: 14px;
+    background: var(--bg);
+    padding: 0 6px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .label-id {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    font-size: 22px;
+    letter-spacing: 0.06em;
+    color: var(--text);
+    min-height: 28px;
+    word-break: break-all;
+  }
+  .label-id.empty { color: var(--text-dim); font-weight: 400; }
+  .label-bars {
+    display: flex;
+    gap: 2px;
+    margin-top: 10px;
+    height: 22px;
+    align-items: flex-end;
+  }
+  .label-bars span {
+    background: var(--accent);
+    width: 3px;
+    opacity: 0.85;
+  }
+
+  form {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 24px;
+  }
+
+  fieldset {
+    border: none;
+    padding: 0;
+    margin: 0 0 22px;
+  }
+  legend {
+    font-family: 'Oswald', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 0 0 10px;
+    width: 100%;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 14px;
+  }
+
+  .field {
+    margin-bottom: 16px;
+  }
+  .field:last-child { margin-bottom: 0; }
+
+  label {
+    display: block;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+  }
+  label .req { color: var(--accent); }
+  label .opt { color: var(--text-dim); text-transform: none; letter-spacing: 0; }
+
+  input[type="text"],
+  input[type="number"],
+  select,
+  textarea {
+    width: 100%;
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+    padding: 10px 12px;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  input::placeholder, textarea::placeholder { color: #56585b; }
+  input:focus, select:focus, textarea:focus {
+    border-color: var(--accent);
+  }
+  textarea { resize: vertical; min-height: 60px; }
+
+  select {
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%), linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+    background-position: calc(100% - 18px) center, calc(100% - 13px) center;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+
+  .row2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .error-text {
+    font-size: 12px;
+    color: var(--bad);
+    margin-top: 6px;
+    display: none;
+  }
+  .field.invalid input,
+  .field.invalid select,
+  .field.invalid textarea {
+    border-color: var(--bad);
+  }
+  .field.invalid .error-text { display: block; }
+
+  button {
+    width: 100%;
+    background: var(--accent);
+    color: #171215;
+    border: none;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 14px;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.05s ease;
+  }
+  button:hover { background: #ff7f3d; }
+  button:active { transform: translateY(1px); }
+  button:disabled {
+    background: var(--panel-raised);
+    color: var(--text-dim);
+    cursor: not-allowed;
+  }
+
+  .status {
+    margin-top: 16px;
+    padding: 12px 14px;
+    font-size: 13px;
+    border: 1px solid var(--line);
+    display: none;
+    line-height: 1.5;
+  }
+  .status.show { display: block; }
+  .status.ok { border-color: var(--good); color: var(--good); }
+  .status.err { border-color: var(--bad); color: var(--bad); }
+  .status.pending { border-color: var(--text-dim); color: var(--text-dim); }
+
+  .hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <div class="eyebrow">Team 2813 &middot; Gear Heads</div>
+  <h1>Inventory Request</h1>
+  <div class="subhead">Log a stock change. Every field marked <span style="color:var(--accent)">*</span> is required — the request won't send without it.</div>
+
+  <div class="label-preview">
+    <span class="tag">Item ID</span>
+    <div class="label-id empty" id="labelPreview">— NOT SET —</div>
+    <div class="label-bars" id="labelBars"></div>
+  </div>
+
+  <form id="invForm" novalidate>
+    <fieldset>
+      <legend>Item</legend>
+
+      <div class="field" data-field="itemId">
+        <label for="itemId">Item ID <span class="req">*</span></label>
+        <input type="text" id="itemId" placeholder="e.g. ELEC-WAGO-221">
+        <div class="hint">Normalized automatically — spaces and case don't matter, but be consistent.</div>
+        <div class="error-text">Enter an item ID.</div>
+      </div>
+
+      <div class="field" data-field="itemName">
+        <label for="itemName">Item Name <span class="opt">(required if this ID is new)</span></label>
+        <input type="text" id="itemName" placeholder="e.g. WAGO 221 Lever Nut">
+        <div class="error-text">This ID doesn't look familiar — give it a name.</div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Action</legend>
+
+      <div class="field" data-field="action">
+        <label for="action">Type <span class="req">*</span></label>
+        <select id="action">
+          <option value="" disabled selected>Choose an action</option>
+          <option value="add">Add stock (+)</option>
+          <option value="checkout">Check out / use stock (−)</option>
+          <option value="set">Set exact quantity</option>
+        </select>
+        <div class="error-text">Choose what this request does.</div>
+      </div>
+
+      <div class="field" data-field="quantityDelta" id="deltaField">
+        <label for="quantityDelta">Quantity <span class="req">*</span></label>
+        <input type="number" id="quantityDelta" min="1" step="1" placeholder="e.g. 3">
+        <div class="error-text">Enter a quantity greater than 0.</div>
+      </div>
+
+      <div class="field" data-field="quantity" id="setField" style="display:none;">
+        <label for="quantity">New Total Quantity <span class="req">*</span></label>
+        <input type="number" id="quantity" min="0" step="1" placeholder="e.g. 40">
+        <div class="error-text">Enter a quantity of 0 or more.</div>
+      </div>
+
+      <div class="field" data-field="lowStockThreshold">
+        <label for="lowStockThreshold">Low Stock Threshold <span class="opt">(only used when creating a new item)</span></label>
+        <input type="number" id="lowStockThreshold" min="0" step="1" placeholder="e.g. 10">
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Who / Where</legend>
+
+      <div class="row2">
+        <div class="field" data-field="subteam">
+          <label for="subteam">Subteam <span class="req">*</span></label>
+          <input type="text" id="subteam" placeholder="e.g. Electrical">
+          <div class="error-text">Enter a subteam.</div>
+        </div>
+        <div class="field" data-field="submittedBy">
+          <label for="submittedBy">Your Name <span class="req">*</span></label>
+          <input type="text" id="submittedBy" placeholder="e.g. JJ">
+          <div class="error-text">Enter your name.</div>
+        </div>
+      </div>
+
+      <div class="field" data-field="notes">
+        <label for="notes">Notes <span class="opt">(optional)</span></label>
+        <textarea id="notes" placeholder="e.g. restocked from Amazon order"></textarea>
+      </div>
+    </fieldset>
+
+    <button type="submit" id="submitBtn">Send Request</button>
+    <div class="status" id="status"></div>
+  </form>
+</div>
+
+<script>
+  const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyZnppGQxiVdUF9gWkps2n_BH0yrcriiSiV7tSTQr98qgWOkfIz_fUSfPkhIIwB3vK7/exec';
+
+  const form = document.getElementById('invForm');
+  const itemIdInput = document.getElementById('itemId');
+  const itemNameInput = document.getElementById('itemName');
+  const actionSelect = document.getElementById('action');
+  const deltaField = document.getElementById('deltaField');
+  const setField = document.getElementById('setField');
+  const quantityDeltaInput = document.getElementById('quantityDelta');
+  const quantityInput = document.getElementById('quantity');
+  const subteamInput = document.getElementById('subteam');
+  const submittedByInput = document.getElementById('submittedBy');
+  const notesInput = document.getElementById('notes');
+  const labelPreview = document.getElementById('labelPreview');
+  const labelBars = document.getElementById('labelBars');
+  const statusEl = document.getElementById('status');
+  const submitBtn = document.getElementById('submitBtn');
+
+  // Mirrors the backend's normalizeId(): uppercase, collapse whitespace/underscores
+  // to hyphens, strip anything that isn't A-Z / 0-9 / hyphen.
+  function normalizeId(raw) {
+    return String(raw || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_]+/g, '-')
+      .replace(/[^A-Z0-9-]/g, '')
+      .replace(/-+/g, '-');
+  }
+
+  function renderLabelPreview() {
+    const id = normalizeId(itemIdInput.value);
+    if (!id) {
+      labelPreview.textContent = '— NOT SET —';
+      labelPreview.classList.add('empty');
+      labelBars.innerHTML = '';
+      return;
+    }
+    labelPreview.textContent = id;
+    labelPreview.classList.remove('empty');
+
+    // Decorative barcode-style bars, deterministic from the ID string —
+    // not a real scannable barcode, just a visual echo of "this becomes a label".
+    labelBars.innerHTML = '';
+    for (let i = 0; i < id.length; i++) {
+      const bar = document.createElement('span');
+      const h = 6 + (id.charCodeAt(i) % 16);
+      bar.style.height = h + 'px';
+      labelBars.appendChild(bar);
+    }
+  }
+  itemIdInput.addEventListener('input', renderLabelPreview);
+
+  function toggleQuantityFields() {
+    const action = actionSelect.value;
+    deltaField.style.display = (action === 'add' || action === 'checkout') ? '' : 'none';
+    setField.style.display = (action === 'set') ? '' : 'none';
+    const label = deltaField.querySelector('label');
+    if (action === 'checkout') {
+      label.innerHTML = 'Quantity to Remove <span class="req">*</span>';
+    } else {
+      label.innerHTML = 'Quantity to Add <span class="req">*</span>';
+    }
+  }
+  actionSelect.addEventListener('change', toggleQuantityFields);
+
+  function setInvalid(fieldName, invalid) {
+    const el = form.querySelector('[data-field="' + fieldName + '"]');
+    if (!el) return;
+    el.classList.toggle('invalid', invalid);
+  }
+
+  function validate() {
+    let valid = true;
+
+    const idVal = normalizeId(itemIdInput.value);
+    setInvalid('itemId', !idVal);
+    if (!idVal) valid = false;
+
+    // Name only required if we can't tell whether this ID already exists —
+    // since this form has no way to check the sheet, require it every time
+    // an ID is present, to make sure new items never get created nameless.
+    const nameVal = itemNameInput.value.trim();
+    setInvalid('itemName', !nameVal);
+    if (!nameVal) valid = false;
+
+    const actionVal = actionSelect.value;
+    setInvalid('action', !actionVal);
+    if (!actionVal) valid = false;
+
+    if (actionVal === 'add' || actionVal === 'checkout') {
+      const n = Number(quantityDeltaInput.value);
+      const bad = !quantityDeltaInput.value || !Number.isFinite(n) || n <= 0;
+      setInvalid('quantityDelta', bad);
+      if (bad) valid = false;
+    } else if (actionVal === 'set') {
+      const n = Number(quantityInput.value);
+      const bad = quantityInput.value === '' || !Number.isFinite(n) || n < 0;
+      setInvalid('quantity', bad);
+      if (bad) valid = false;
+    }
+
+    const subteamVal = subteamInput.value.trim();
+    setInvalid('subteam', !subteamVal);
+    if (!subteamVal) valid = false;
+
+    const submittedByVal = submittedByInput.value.trim();
+    setInvalid('submittedBy', !submittedByVal);
+    if (!submittedByVal) valid = false;
+
+    return valid;
+  }
+
+  function showStatus(kind, message) {
+    statusEl.className = 'status show ' + kind;
+    statusEl.textContent = message;
+  }
+
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+
+    if (!validate()) {
+      showStatus('err', 'Fix the highlighted fields — nothing was sent.');
+      return;
+    }
+
+    const action = actionSelect.value;
+    const payload = {
+      action: action,
+      itemId: normalizeId(itemIdInput.value),
+      itemName: itemNameInput.value.trim(),
+      subteam: subteamInput.value.trim(),
+      submittedBy: submittedByInput.value.trim()
+    };
+    if (action === 'add' || action === 'checkout') {
+      payload.quantityDelta = Number(quantityDeltaInput.value);
+    } else if (action === 'set') {
+      payload.quantity = Number(quantityInput.value);
+    }
+    const threshold = document.getElementById('lowStockThreshold').value;
+    if (threshold !== '') payload.lowStockThreshold = Number(threshold);
+    const notes = notesInput.value.trim();
+    if (notes) payload.notes = notes;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Sending…';
+    showStatus('pending', 'Sending request…');
+
+    try {
+      const res = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight against Apps Script
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        showStatus('ok', 'Done — ' + payload.itemId + ' is now at ' + data.result.newQuantity + '.');
+        form.reset();
+        toggleQuantityFields();
+        renderLabelPreview();
+      } else {
+        showStatus('err', 'Server rejected the request: ' + (data.error || 'unknown error'));
+      }
+    } catch (err) {
+      showStatus('err', 'Request failed to send: ' + err.message + '. Check your connection and the endpoint URL.');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Send Request';
+    }
+  });
+
+  toggleQuantityFields();
+  renderLabelPreview();
+</script>
+</body>
+</html>
