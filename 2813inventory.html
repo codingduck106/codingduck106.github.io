@@ -18,6 +18,7 @@
     --accent-dim: #7a3712;
     --good: #4caf6d;
     --bad: #e5484d;
+    --warn: #e5b84c;
   }
 
   * { box-sizing: border-box; }
@@ -131,6 +132,10 @@
   input:focus, select:focus, textarea:focus {
     border-color: var(--accent);
   }
+  input:disabled, select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
   textarea { resize: vertical; min-height: 60px; }
 
   select {
@@ -145,6 +150,37 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
+  }
+
+  .row-unit {
+    display: grid;
+    grid-template-columns: 1fr 110px;
+    gap: 12px;
+  }
+
+  .type-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .type-tab {
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    font-family: 'Oswald', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: center;
+    padding: 10px 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .type-tab.active {
+    border-color: var(--accent);
+    color: var(--text);
+    background: var(--accent-dim);
   }
 
   .error-text {
@@ -201,6 +237,28 @@
     margin-top: 6px;
     line-height: 1.4;
   }
+
+  .status-pill-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+  .status-pill {
+    border: 1px solid var(--line);
+    background: var(--panel-raised);
+    color: var(--text-dim);
+    font-family: 'Oswald', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    text-align: center;
+    padding: 12px 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .status-pill[data-status="out"].active { border-color: var(--bad); color: var(--bad); background: rgba(229,72,77,0.12); }
+  .status-pill[data-status="low"].active { border-color: var(--warn); color: var(--warn); background: rgba(229,184,76,0.12); }
+  .status-pill[data-status="enough"].active { border-color: var(--good); color: var(--good); background: rgba(76,175,109,0.12); }
 </style>
 </head>
 <body>
@@ -219,12 +277,22 @@
         <div class="hint">Keep naming consistent so the same item doesn't get logged twice under slightly different names.</div>
         <div class="error-text">Enter an item name.</div>
       </div>
+
+      <div class="field" data-field="itemType">
+        <label>Item Type <span class="req">*</span></label>
+        <div class="type-tabs" id="typeTabs">
+          <div class="type-tab active" data-type="countable">Countable</div>
+          <div class="type-tab" data-type="wire">Wire / Length</div>
+          <div class="type-tab" data-type="bulk">Bulk</div>
+        </div>
+        <div class="hint" id="typeHint">Discrete items you count one by one — gears, sensors, connectors, standoffs, motors.</div>
+      </div>
     </fieldset>
 
     <fieldset>
       <legend>Action</legend>
 
-      <div class="field" data-field="action">
+      <div class="field" data-field="action" id="actionField">
         <label for="action">Type <span class="req">*</span></label>
         <select id="action">
           <option value="add">Add stock (+)</option>
@@ -234,19 +302,48 @@
         <div class="error-text">Choose what this request does.</div>
       </div>
 
+      <!-- Countable / Wire: numeric quantity fields -->
       <div class="field" data-field="quantityDelta" id="deltaField" style="display:none;">
         <label for="quantityDelta">Quantity <span class="req">*</span></label>
-        <input type="number" id="quantityDelta" min="1" step="1" placeholder="e.g. 3">
+        <div class="row-unit" id="deltaRow">
+          <input type="number" id="quantityDelta" min="0" step="1" placeholder="e.g. 3">
+          <select id="deltaUnit" style="display:none;">
+            <option value="ft">ft</option>
+            <option value="in">in</option>
+            <option value="m">m</option>
+            <option value="cm">cm</option>
+          </select>
+        </div>
         <div class="error-text">Enter a quantity greater than 0.</div>
       </div>
 
       <div class="field" data-field="quantity" id="setField">
         <label for="quantity">New Total Quantity <span class="req">*</span></label>
-        <input type="number" id="quantity" min="0" step="1" placeholder="e.g. 40">
+        <div class="row-unit" id="setRow">
+          <input type="number" id="quantity" min="0" step="1" placeholder="e.g. 40">
+          <select id="setUnit" style="display:none;">
+            <option value="ft">ft</option>
+            <option value="in">in</option>
+            <option value="m">m</option>
+            <option value="cm">cm</option>
+          </select>
+        </div>
         <div class="error-text">Enter a quantity of 0 or more.</div>
       </div>
 
-      <div class="field" data-field="lowStockThreshold">
+      <!-- Bulk: qualitative stock level instead of a count -->
+      <div class="field" data-field="bulkStatus" id="bulkStatusField" style="display:none;">
+        <label>Stock Level <span class="req">*</span></label>
+        <div class="status-pill-row" id="bulkPills">
+          <div class="status-pill" data-status="out">Out of Stock</div>
+          <div class="status-pill" data-status="low">Low</div>
+          <div class="status-pill" data-status="enough">Enough</div>
+        </div>
+        <div class="hint">Bulk items (zip ties, heat shrink, tape, hardware bags) aren't counted exactly — just flag the current level.</div>
+        <div class="error-text">Pick a stock level.</div>
+      </div>
+
+      <div class="field" data-field="lowStockThreshold" id="thresholdField">
         <label for="lowStockThreshold">Low Stock Threshold <span class="opt">(only used when creating a new item)</span></label>
         <input type="number" id="lowStockThreshold" min="0" step="1" value="0">
       </div>
@@ -282,31 +379,92 @@
 <script>
   const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyZnppGQxiVdUF9gWkps2n_BH0yrcriiSiV7tSTQr98qgWOkfIz_fUSfPkhIIwB3vK7/exec';
 
+  const TYPE_HINTS = {
+    countable: 'Discrete items you count one by one — gears, sensors, connectors, standoffs, motors.',
+    wire: 'Spools or lengths measured in feet/inches/meters — wire, tubing, pneumatic line, belt stock.',
+    bulk: 'Loose consumables where an exact count isn\u2019t practical — zip ties, heat shrink, tape, hardware bags.'
+  };
+
   const form = document.getElementById('invForm');
   const itemNameInput = document.getElementById('itemName');
+  const typeTabs = document.getElementById('typeTabs');
+  const typeHint = document.getElementById('typeHint');
+
+  const actionField = document.getElementById('actionField');
   const actionSelect = document.getElementById('action');
   const deltaField = document.getElementById('deltaField');
   const setField = document.getElementById('setField');
   const quantityDeltaInput = document.getElementById('quantityDelta');
   const quantityInput = document.getElementById('quantity');
+  const deltaUnit = document.getElementById('deltaUnit');
+  const setUnit = document.getElementById('setUnit');
+
+  const bulkStatusField = document.getElementById('bulkStatusField');
+  const bulkPills = document.getElementById('bulkPills');
+  const thresholdField = document.getElementById('thresholdField');
+
   const subteamInput = document.getElementById('subteam');
   const submittedByInput = document.getElementById('submittedBy');
   const notesInput = document.getElementById('notes');
   const statusEl = document.getElementById('status');
   const submitBtn = document.getElementById('submitBtn');
 
-  function toggleQuantityFields() {
-    const action = actionSelect.value;
-    deltaField.style.display = (action === 'add' || action === 'checkout') ? '' : 'none';
-    setField.style.display = (action === 'set') ? '' : 'none';
-    const label = deltaField.querySelector('label');
-    if (action === 'checkout') {
-      label.innerHTML = 'Quantity to Remove <span class="req">*</span>';
-    } else {
-      label.innerHTML = 'Quantity to Add <span class="req">*</span>';
-    }
+  let itemType = 'countable';
+  let bulkStatus = null;
+
+  function selectType(type) {
+    itemType = type;
+    [...typeTabs.children].forEach(tab => tab.classList.toggle('active', tab.dataset.type === type));
+    typeHint.textContent = TYPE_HINTS[type];
+    updateFormMode();
   }
-  actionSelect.addEventListener('change', toggleQuantityFields);
+  typeTabs.addEventListener('click', (e) => {
+    const tab = e.target.closest('.type-tab');
+    if (!tab) return;
+    selectType(tab.dataset.type);
+  });
+
+  bulkPills.addEventListener('click', (e) => {
+    const pill = e.target.closest('.status-pill');
+    if (!pill) return;
+    bulkStatus = pill.dataset.status;
+    [...bulkPills.children].forEach(p => p.classList.toggle('active', p === pill));
+    setInvalid('bulkStatus', false);
+  });
+
+  function updateFormMode() {
+    const isBulk = itemType === 'bulk';
+    const isWire = itemType === 'wire';
+    const action = actionSelect.value;
+
+    // Bulk items only ever get their status set directly — add/checkout amounts don't apply.
+    actionField.style.display = isBulk ? 'none' : '';
+    if (isBulk) actionSelect.value = 'set';
+
+    bulkStatusField.style.display = isBulk ? '' : 'none';
+    deltaField.style.display = (!isBulk && (action === 'add' || action === 'checkout')) ? '' : 'none';
+    setField.style.display = (!isBulk && action === 'set') ? '' : 'none';
+    thresholdField.style.display = isBulk ? 'none' : '';
+
+    deltaUnit.style.display = isWire ? '' : 'none';
+    setUnit.style.display = isWire ? '' : 'none';
+    quantityDeltaInput.step = isWire ? '0.1' : '1';
+    quantityInput.step = isWire ? '0.1' : '1';
+
+    const deltaLabel = deltaField.querySelector('label');
+    if (action === 'checkout') {
+      deltaLabel.innerHTML = (isWire ? 'Length to Remove' : 'Quantity to Remove') + ' <span class="req">*</span>';
+    } else {
+      deltaLabel.innerHTML = (isWire ? 'Length to Add' : 'Quantity to Add') + ' <span class="req">*</span>';
+    }
+    document.querySelector('label[for="quantity"]').innerHTML = (isWire ? 'New Total Length' : 'New Total Quantity') + ' <span class="req">*</span>';
+  }
+  actionSelect.addEventListener('change', updateFormMode);
+
+  // Keep the two unit dropdowns (add/checkout row vs. set-quantity row) in sync
+  // since only one is ever visible at a time but either could be the one submitted.
+  deltaUnit.addEventListener('change', () => { setUnit.value = deltaUnit.value; });
+  setUnit.addEventListener('change', () => { deltaUnit.value = setUnit.value; });
 
   function setInvalid(fieldName, invalid) {
     const el = form.querySelector('[data-field="' + fieldName + '"]');
@@ -321,20 +479,25 @@
     setInvalid('itemName', !nameVal);
     if (!nameVal) valid = false;
 
-    const actionVal = actionSelect.value;
-    setInvalid('action', !actionVal);
-    if (!actionVal) valid = false;
+    if (itemType === 'bulk') {
+      setInvalid('bulkStatus', !bulkStatus);
+      if (!bulkStatus) valid = false;
+    } else {
+      const actionVal = actionSelect.value;
+      setInvalid('action', !actionVal);
+      if (!actionVal) valid = false;
 
-    if (actionVal === 'add' || actionVal === 'checkout') {
-      const n = Number(quantityDeltaInput.value);
-      const bad = !quantityDeltaInput.value || !Number.isFinite(n) || n <= 0;
-      setInvalid('quantityDelta', bad);
-      if (bad) valid = false;
-    } else if (actionVal === 'set') {
-      const n = Number(quantityInput.value);
-      const bad = quantityInput.value === '' || !Number.isFinite(n) || n < 0;
-      setInvalid('quantity', bad);
-      if (bad) valid = false;
+      if (actionVal === 'add' || actionVal === 'checkout') {
+        const n = Number(quantityDeltaInput.value);
+        const bad = !quantityDeltaInput.value || !Number.isFinite(n) || n <= 0;
+        setInvalid('quantityDelta', bad);
+        if (bad) valid = false;
+      } else if (actionVal === 'set') {
+        const n = Number(quantityInput.value);
+        const bad = quantityInput.value === '' || !Number.isFinite(n) || n < 0;
+        setInvalid('quantity', bad);
+        if (bad) valid = false;
+      }
     }
 
     const subteamVal = subteamInput.value.trim();
@@ -353,6 +516,8 @@
     statusEl.textContent = message;
   }
 
+  const BULK_CODE = { out: 0, low: 1, enough: 2 };
+
   form.addEventListener('submit', async function (e) {
     e.preventDefault();
 
@@ -361,20 +526,30 @@
       return;
     }
 
-    const action = actionSelect.value;
     const payload = {
-      action: action,
       itemName: itemNameInput.value.trim(),
+      itemType: itemType,
       subteam: subteamInput.value.trim(),
       submittedBy: submittedByInput.value.trim()
     };
-    if (action === 'add' || action === 'checkout') {
-      payload.quantityDelta = Number(quantityDeltaInput.value);
-    } else if (action === 'set') {
-      payload.quantity = Number(quantityInput.value);
+
+    if (itemType === 'bulk') {
+      payload.action = 'set';
+      payload.stockStatus = bulkStatus;
+      payload.quantity = BULK_CODE[bulkStatus];
+    } else {
+      const action = actionSelect.value;
+      payload.action = action;
+      if (itemType === 'wire') payload.unit = action === 'set' ? setUnit.value : deltaUnit.value;
+      if (action === 'add' || action === 'checkout') {
+        payload.quantityDelta = Number(quantityDeltaInput.value);
+      } else if (action === 'set') {
+        payload.quantity = Number(quantityInput.value);
+      }
+      const threshold = document.getElementById('lowStockThreshold').value;
+      if (threshold !== '') payload.lowStockThreshold = Number(threshold);
     }
-    const threshold = document.getElementById('lowStockThreshold').value;
-    if (threshold !== '') payload.lowStockThreshold = Number(threshold);
+
     const notes = notesInput.value.trim();
     if (notes) payload.notes = notes;
 
@@ -391,12 +566,19 @@
       const data = await res.json();
 
       if (data.ok) {
-        showStatus('ok', 'Done — ' + payload.itemName + ' is now at ' + data.result.newQuantity + '.');
+        const resultText = itemType === 'bulk'
+          ? 'Done — ' + payload.itemName + ' is now marked ' + bulkStatus.toUpperCase() + '.'
+          : 'Done — ' + payload.itemName + ' is now at ' + data.result.newQuantity + (itemType === 'wire' ? (' ' + (payload.unit || '')) : '') + '.';
+        showStatus('ok', resultText);
+
         form.reset();
+        selectType('countable');
         actionSelect.value = 'set';
+        bulkStatus = null;
+        [...bulkPills.children].forEach(p => p.classList.remove('active'));
         document.getElementById('lowStockThreshold').value = '0';
         subteamInput.value = 'Fab';
-        toggleQuantityFields();
+        updateFormMode();
       } else {
         showStatus('err', 'Server rejected the request: ' + (data.error || 'unknown error'));
       }
@@ -408,7 +590,7 @@
     }
   });
 
-  toggleQuantityFields();
+  updateFormMode();
 </script>
 </body>
 </html>
