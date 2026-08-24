@@ -1,304 +1,596 @@
-/**
- * Team 2813 Inventory Management System — Apps Script backend
- * -------------------------------------------------------------
- * Deploy as a Web App (Deploy > New deployment > Web app).
- *   - Execute as: Me
- *   - Who has access: Anyone with the link (or "Anyone within [org]" if you're on
- *     a Google Workspace domain and want it locked to team accounts)
- *
- * Items are keyed by ItemName (no separate ItemID column).
- *
- * ITEM TYPES
- * -----------
- * Every item has an ItemType, fixed the first time it's created, which
- * controls how it's tracked. This matches the three tabs on the request form:
- *
- *   - "countable"  Discrete whole units (gears, sensors, connectors, standoffs,
- *                   motors). Quantity is always rounded to the nearest integer.
- *                   Default type if none is supplied, so old submissions keep
- *                   working. Unit defaults to "pcs".
- *   - "wire"        Spooled/length material (wire, tubing, pneumatic line, belt
- *                   stock). Quantity is a decimal length in Unit (e.g. "ft",
- *                   "in", "m", "cm"). "checkout" cuts a length off the spool
- *                   and errors out if there isn't enough left; "add" is used
- *                   when a new spool/reel comes into stock.
- *   - "bulk"        Loose consumables where an exact count isn't practical
- *                   (zip ties, heat shrink, tape, hardware bags). These are
- *                   NOT tracked by a number at all — instead the form sends a
- *                   qualitative StockStatus of "out" | "low" | "enough",
- *                   stored alongside a numeric code (0/1/2, matching the
- *                   form's BULK_CODE) purely so the column sorts sensibly.
- *                   There's no LowStockThreshold for bulk items — "out" or
- *                   "low" triggers the alert directly.
- *
- * The web form (see inventory-request.html) POSTs JSON to the resulting
- * /exec URL.
- */
-
-// ====== CONFIG ======
-const SHEET_NAME = 'Inventory';
-const ALERTS_SHEET_NAME = 'Alerts';
-const ALERT_EMAILS = ['jazl.ihsan@gmail.com']; // <-- change me
-
-const ITEM_TYPES = ['countable', 'wire', 'bulk'];
-const DEFAULT_ITEM_TYPE = 'countable';
-const DEFAULT_UNITS = {
-  countable: 'pcs',
-  wire: 'ft',
-  bulk: ''
-};
-
-const BULK_STATUSES = ['out', 'low', 'enough'];
-const BULK_STATUS_CODE = { out: 0, low: 1, enough: 2 }; // matches the form's BULK_CODE
-
-const HEADERS = [
-  'ItemName', 'ItemType', 'Quantity', 'StockStatus', 'Unit', 'LowStockThreshold',
-  'Subteams', 'ImageBase64', 'LastUpdated', 'LastUpdatedBy', 'Notes'
-];
-// Column indices (1-based, matches HEADERS order)
-const COL = {
-  ItemName: 1, ItemType: 2, Quantity: 3, StockStatus: 4, Unit: 5, LowStockThreshold: 6,
-  Subteams: 7, ImageBase64: 8, LastUpdated: 9, LastUpdatedBy: 10, Notes: 11
-};
-
-// ====== ENTRY POINTS ======
-
-function doPost(e) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000); // avoid two simultaneous submissions racing on the same row
-
-  try {
-    const body = JSON.parse(e.postData.contents);
-    const result = handleAction(body);
-    return jsonResponse({ ok: true, result: result });
-  } catch (err) {
-    return jsonResponse({ ok: false, error: err.message });
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function doGet(e) {
-  const sheet = getSheet();
-  const data = sheet.getDataRange().getValues();
-  const headers = data.shift();
-
-  // Optional query param ?itemName=xxx to fetch a single item (skips ImageBase64
-  // in bulk listing to keep the payload small; include it for single lookups)
-  const itemName = e.parameter.itemName;
-
-  if (itemName) {
-    const row = data.find(r => String(r[COL.ItemName - 1]).toLowerCase() === String(itemName).toLowerCase());
-    if (!row) return jsonResponse({ ok: false, error: 'Item not found' });
-    return jsonResponse({ ok: true, item: rowToObject(headers, row) });
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inventory Request — Team 2813</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #17181a;
+    --panel: #1f2123;
+    --panel-raised: #26282b;
+    --line: #383b3e;
+    --text: #e9e6df;
+    --text-dim: #8b8d8f;
+    --accent: #ff6a1a;
+    --accent-dim: #7a3712;
+    --good: #4caf6d;
+    --bad: #e5484d;
+    --warn: #e5b84c;
   }
 
-  const items = data.map(r => {
-    const obj = rowToObject(headers, r);
-    delete obj.ImageBase64; // omit heavy field from bulk listing
-    return obj;
-  });
-  return jsonResponse({ ok: true, items: items });
-}
+  * { box-sizing: border-box; }
 
-// ====== CORE LOGIC ======
-
-/**
- * Expected payload shapes from the form:
- *
- * Countable / Wire:
- * {
- *   "action": "add" | "checkout" | "set",
- *   "itemName": "WAGO 221 Lever Nut",
- *   "itemType": "countable" | "wire",        // only used/needed on create
- *   "unit": "ft",                            // wire only; optional, only needed on create
- *   "quantityDelta": 3,                      // for "add" / "checkout"; decimals ok for wire
- *   "quantity": 40,                          // for "set" (absolute value)
- *   "lowStockThreshold": 10,                 // optional, only needed on create
- *   "subteam": "Electrical",
- *   "submittedBy": "Jane Doe",
- *   "notes": "restocked from Amazon order"   // optional
- * }
- *
- * Bulk:
- * {
- *   "action": "set",
- *   "itemName": "Zip Ties (Small)",
- *   "itemType": "bulk",
- *   "stockStatus": "out" | "low" | "enough",
- *   "quantity": 0,                           // numeric code, informational only
- *   "subteam": "Fab",
- *   "submittedBy": "Jane Doe",
- *   "notes": "..."                           // optional
- * }
- *
- * Items are matched by ItemName (case-insensitive). Since there's no separate
- * ID field, submissions must use the exact item name consistently — "WAGO
- * 221" and "wago 221 lever nut" will create two different rows.
- *
- * ItemType is fixed at creation time (first submission for a given ItemName).
- * Later submissions don't need to (and can't) change it.
- */
-function handleAction(body) {
-  if (!body.itemName) throw new Error('itemName is required');
-
-  const sheet = getSheet();
-  const data = sheet.getDataRange().getValues();
-  let rowIndex = data.findIndex((r, i) => i > 0 &&
-    String(r[COL.ItemName - 1]).toLowerCase() === String(body.itemName).toLowerCase());
-
-  // ---- Create new item if it doesn't exist ----
-  if (rowIndex === -1) {
-    const itemType = normalizeItemType(body.itemType);
-    const unit = (itemType === 'wire')
-      ? ((body.unit && String(body.unit).trim()) || DEFAULT_UNITS.wire)
-      : DEFAULT_UNITS[itemType];
-    const newRow = [
-      body.itemName,
-      itemType,
-      0,      // Quantity
-      '',     // StockStatus (bulk only)
-      unit,
-      body.lowStockThreshold || 0,
-      '',
-      '',
-      new Date(),
-      body.submittedBy || '',
-      body.notes || ''
-    ];
-    // 11 values, matching the 11 HEADERS above in order — keep these in sync
-    // any time a column is added or removed.
-    sheet.appendRow(newRow);
-    rowIndex = sheet.getLastRow() - 1; // 0-based index into `data`-style array
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-image:
+      repeating-linear-gradient(135deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 14px);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px 80px;
   }
 
-  const sheetRow = rowIndex + 1; // 1-based row number in the actual sheet
-  const itemType = normalizeItemType(sheet.getRange(sheetRow, COL.ItemType).getValue());
+  .sheet {
+    width: 100%;
+    max-width: 560px;
+  }
 
-  let newQty;
+  .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  h1 {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 700;
+    font-size: 32px;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    margin: 0 0 4px;
+  }
+
+  .subhead {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-bottom: 28px;
+    line-height: 1.5;
+  }
+
+  form {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    padding: 24px;
+  }
+
+  fieldset {
+    border: none;
+    padding: 0;
+    margin: 0 0 22px;
+  }
+  legend {
+    font-family: 'Oswald', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 0 0 10px;
+    width: 100%;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 14px;
+  }
+
+  .field {
+    margin-bottom: 16px;
+  }
+  .field:last-child { margin-bottom: 0; }
+
+  label {
+    display: block;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+  }
+  label .req { color: var(--accent); }
+  label .opt { color: var(--text-dim); text-transform: none; letter-spacing: 0; }
+
+  input[type="text"],
+  input[type="number"],
+  select,
+  textarea {
+    width: 100%;
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+    padding: 10px 12px;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  input::placeholder, textarea::placeholder { color: #56585b; }
+  input:focus, select:focus, textarea:focus {
+    border-color: var(--accent);
+  }
+  input:disabled, select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+
+  select {
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%), linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+    background-position: calc(100% - 18px) center, calc(100% - 13px) center;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+
+  .row2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .row-unit {
+    display: grid;
+    grid-template-columns: 1fr 110px;
+    gap: 12px;
+  }
+
+  .type-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .type-tab {
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    font-family: 'Oswald', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: center;
+    padding: 10px 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .type-tab.active {
+    border-color: var(--accent);
+    color: var(--text);
+    background: var(--accent-dim);
+  }
+
+  .error-text {
+    font-size: 12px;
+    color: var(--bad);
+    margin-top: 6px;
+    display: none;
+  }
+  .field.invalid input,
+  .field.invalid select,
+  .field.invalid textarea {
+    border-color: var(--bad);
+  }
+  .field.invalid .error-text { display: block; }
+
+  button {
+    width: 100%;
+    background: var(--accent);
+    color: #171215;
+    border: none;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 14px;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.05s ease;
+  }
+  button:hover { background: #ff7f3d; }
+  button:active { transform: translateY(1px); }
+  button:disabled {
+    background: var(--panel-raised);
+    color: var(--text-dim);
+    cursor: not-allowed;
+  }
+
+  .status {
+    margin-top: 16px;
+    padding: 12px 14px;
+    font-size: 13px;
+    border: 1px solid var(--line);
+    display: none;
+    line-height: 1.5;
+  }
+  .status.show { display: block; }
+  .status.ok { border-color: var(--good); color: var(--good); }
+  .status.err { border-color: var(--bad); color: var(--bad); }
+  .status.pending { border-color: var(--text-dim); color: var(--text-dim); }
+
+  .hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  .status-pill-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+  .status-pill {
+    border: 1px solid var(--line);
+    background: var(--panel-raised);
+    color: var(--text-dim);
+    font-family: 'Oswald', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    text-align: center;
+    padding: 12px 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .status-pill[data-status="out"].active { border-color: var(--bad); color: var(--bad); background: rgba(229,72,77,0.12); }
+  .status-pill[data-status="low"].active { border-color: var(--warn); color: var(--warn); background: rgba(229,184,76,0.12); }
+  .status-pill[data-status="enough"].active { border-color: var(--good); color: var(--good); background: rgba(76,175,109,0.12); }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <div class="eyebrow">Team 2813 &middot; Gear Heads</div>
+  <h1>Inventory Request</h1>
+  <div class="subhead">Log a stock change. Every field marked <span style="color:var(--accent)">*</span> is required — the request won't send without it.</div>
+
+  <form id="invForm" novalidate>
+    <fieldset>
+      <legend>Item</legend>
+
+      <div class="field" data-field="itemName">
+        <label for="itemName">Item Name <span class="req">*</span></label>
+        <input type="text" id="itemName" placeholder="e.g. WAGO 221 Lever Nut">
+        <div class="hint">Keep naming consistent so the same item doesn't get logged twice under slightly different names.</div>
+        <div class="error-text">Enter an item name.</div>
+      </div>
+
+      <div class="field" data-field="itemType">
+        <label>Item Type <span class="req">*</span></label>
+        <div class="type-tabs" id="typeTabs">
+          <div class="type-tab active" data-type="countable">Countable</div>
+          <div class="type-tab" data-type="wire">Wire / Length</div>
+          <div class="type-tab" data-type="bulk">Bulk</div>
+        </div>
+        <div class="hint" id="typeHint">Discrete items you count one by one — gears, sensors, connectors, standoffs, motors.</div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Action</legend>
+
+      <div class="field" data-field="action" id="actionField">
+        <label for="action">Type <span class="req">*</span></label>
+        <select id="action">
+          <option value="add">Add stock (+)</option>
+          <option value="checkout">Check out / use stock (−)</option>
+          <option value="set" selected>Set exact quantity</option>
+        </select>
+        <div class="error-text">Choose what this request does.</div>
+      </div>
+
+      <!-- Countable / Wire: numeric quantity fields -->
+      <div class="field" data-field="quantityDelta" id="deltaField" style="display:none;">
+        <label for="quantityDelta">Quantity <span class="req">*</span></label>
+        <div class="row-unit" id="deltaRow">
+          <input type="number" id="quantityDelta" min="0" step="1" placeholder="e.g. 3">
+          <select id="deltaUnit" style="display:none;">
+            <option value="ft">ft</option>
+            <option value="in">in</option>
+            <option value="m">m</option>
+            <option value="cm">cm</option>
+          </select>
+        </div>
+        <div class="error-text">Enter a quantity greater than 0.</div>
+      </div>
+
+      <div class="field" data-field="quantity" id="setField">
+        <label for="quantity">New Total Quantity <span class="req">*</span></label>
+        <div class="row-unit" id="setRow">
+          <input type="number" id="quantity" min="0" step="1" placeholder="e.g. 40">
+          <select id="setUnit" style="display:none;">
+            <option value="ft">ft</option>
+            <option value="in">in</option>
+            <option value="m">m</option>
+            <option value="cm">cm</option>
+          </select>
+        </div>
+        <div class="error-text">Enter a quantity of 0 or more.</div>
+      </div>
+
+      <!-- Bulk: qualitative stock level instead of a count -->
+      <div class="field" data-field="bulkStatus" id="bulkStatusField" style="display:none;">
+        <label>Stock Level <span class="req">*</span></label>
+        <div class="status-pill-row" id="bulkPills">
+          <div class="status-pill" data-status="out">Out of Stock</div>
+          <div class="status-pill" data-status="low">Low</div>
+          <div class="status-pill" data-status="enough">Enough</div>
+        </div>
+        <div class="hint">Bulk items (zip ties, heat shrink, tape, hardware bags) aren't counted exactly — just flag the current level.</div>
+        <div class="error-text">Pick a stock level.</div>
+      </div>
+
+      <div class="field" data-field="lowStockThreshold" id="thresholdField">
+        <label for="lowStockThreshold">Low Stock Threshold <span class="opt">(only used when creating a new item)</span></label>
+        <input type="number" id="lowStockThreshold" min="0" step="1" value="0">
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Who / Where</legend>
+
+      <div class="row2">
+        <div class="field" data-field="subteam">
+          <label for="subteam">Subteam <span class="req">*</span></label>
+          <input type="text" id="subteam" placeholder="e.g. Electrical" value="Fab">
+          <div class="error-text">Enter a subteam.</div>
+        </div>
+        <div class="field" data-field="submittedBy">
+          <label for="submittedBy">Your Name <span class="req">*</span></label>
+          <input type="text" id="submittedBy" placeholder="e.g. JJ">
+          <div class="error-text">Enter your name.</div>
+        </div>
+      </div>
+
+      <div class="field" data-field="notes">
+        <label for="notes">Notes <span class="opt">(optional)</span></label>
+        <textarea id="notes" placeholder="e.g. restocked from Amazon order"></textarea>
+      </div>
+    </fieldset>
+
+    <button type="submit" id="submitBtn">Send Request</button>
+    <div class="status" id="status"></div>
+  </form>
+</div>
+
+<script>
+  const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyZnppGQxiVdUF9gWkps2n_BH0yrcriiSiV7tSTQr98qgWOkfIz_fUSfPkhIIwB3vK7/exec';
+
+  const TYPE_HINTS = {
+    countable: 'Discrete items you count one by one — gears, sensors, connectors, standoffs, motors.',
+    wire: 'Spools or lengths measured in feet/inches/meters — wire, tubing, pneumatic line, belt stock.',
+    bulk: 'Loose consumables where an exact count isn\u2019t practical — zip ties, heat shrink, tape, hardware bags.'
+  };
+
+  const form = document.getElementById('invForm');
+  const itemNameInput = document.getElementById('itemName');
+  const typeTabs = document.getElementById('typeTabs');
+  const typeHint = document.getElementById('typeHint');
+
+  const actionField = document.getElementById('actionField');
+  const actionSelect = document.getElementById('action');
+  const deltaField = document.getElementById('deltaField');
+  const setField = document.getElementById('setField');
+  const quantityDeltaInput = document.getElementById('quantityDelta');
+  const quantityInput = document.getElementById('quantity');
+  const deltaUnit = document.getElementById('deltaUnit');
+  const setUnit = document.getElementById('setUnit');
+
+  const bulkStatusField = document.getElementById('bulkStatusField');
+  const bulkPills = document.getElementById('bulkPills');
+  const thresholdField = document.getElementById('thresholdField');
+
+  const subteamInput = document.getElementById('subteam');
+  const submittedByInput = document.getElementById('submittedBy');
+  const notesInput = document.getElementById('notes');
+  const statusEl = document.getElementById('status');
+  const submitBtn = document.getElementById('submitBtn');
+
+  let itemType = 'countable';
   let bulkStatus = null;
 
-  if (itemType === 'bulk') {
-    // ---- Bulk: qualitative status instead of a count ----
-    bulkStatus = String(body.stockStatus || '').trim().toLowerCase();
-    if (!BULK_STATUSES.includes(bulkStatus)) {
-      throw new Error(`stockStatus must be one of: ${BULK_STATUSES.join(', ')}`);
-    }
-    newQty = BULK_STATUS_CODE[bulkStatus];
-    sheet.getRange(sheetRow, COL.Quantity).setValue(newQty);
-    sheet.getRange(sheetRow, COL.StockStatus).setValue(bulkStatus);
-  } else {
-    // ---- Countable / Wire: numeric quantity update ----
-    const currentQty = Number(sheet.getRange(sheetRow, COL.Quantity).getValue()) || 0;
-    if (body.action === 'add') {
-      newQty = currentQty + Number(body.quantityDelta || 0);
-    } else if (body.action === 'checkout') {
-      const delta = Math.abs(Number(body.quantityDelta || 0));
-      newQty = currentQty - delta;
-      // Wire (spooled) items can't have more cut off than remains.
-      if (itemType === 'wire' && delta > currentQty) {
-        throw new Error(`Not enough ${sheet.getRange(sheetRow, COL.Unit).getValue()} remaining: ` +
-          `have ${currentQty}, tried to check out ${delta}`);
-      }
-    } else if (body.action === 'set') {
-      newQty = Number(body.quantity);
+  function selectType(type) {
+    itemType = type;
+    [...typeTabs.children].forEach(tab => tab.classList.toggle('active', tab.dataset.type === type));
+    typeHint.textContent = TYPE_HINTS[type];
+    updateFormMode();
+  }
+  typeTabs.addEventListener('click', (e) => {
+    const tab = e.target.closest('.type-tab');
+    if (!tab) return;
+    selectType(tab.dataset.type);
+  });
+
+  bulkPills.addEventListener('click', (e) => {
+    const pill = e.target.closest('.status-pill');
+    if (!pill) return;
+    bulkStatus = pill.dataset.status;
+    [...bulkPills.children].forEach(p => p.classList.toggle('active', p === pill));
+    setInvalid('bulkStatus', false);
+  });
+
+  function updateFormMode() {
+    const isBulk = itemType === 'bulk';
+    const isWire = itemType === 'wire';
+    const action = actionSelect.value;
+
+    // Bulk items only ever get their status set directly — add/checkout amounts don't apply.
+    actionField.style.display = isBulk ? 'none' : '';
+    if (isBulk) actionSelect.value = 'set';
+
+    bulkStatusField.style.display = isBulk ? '' : 'none';
+    deltaField.style.display = (!isBulk && (action === 'add' || action === 'checkout')) ? '' : 'none';
+    setField.style.display = (!isBulk && action === 'set') ? '' : 'none';
+    thresholdField.style.display = isBulk ? 'none' : '';
+
+    deltaUnit.style.display = isWire ? '' : 'none';
+    setUnit.style.display = isWire ? '' : 'none';
+    quantityDeltaInput.step = isWire ? '0.1' : '1';
+    quantityInput.step = isWire ? '0.1' : '1';
+
+    const deltaLabel = deltaField.querySelector('label');
+    if (action === 'checkout') {
+      deltaLabel.innerHTML = (isWire ? 'Length to Remove' : 'Quantity to Remove') + ' <span class="req">*</span>';
     } else {
-      throw new Error(`Unknown action: ${body.action}`);
+      deltaLabel.innerHTML = (isWire ? 'Length to Add' : 'Quantity to Add') + ' <span class="req">*</span>';
     }
-    newQty = Math.max(0, newQty);
-    // Countable items are always whole units; wire may be fractional
-    // (e.g. 12.5 ft of wire remaining).
-    if (itemType === 'countable') {
-      newQty = Math.round(newQty);
+    document.querySelector('label[for="quantity"]').innerHTML = (isWire ? 'New Total Length' : 'New Total Quantity') + ' <span class="req">*</span>';
+  }
+  actionSelect.addEventListener('change', updateFormMode);
+
+  // Keep the two unit dropdowns (add/checkout row vs. set-quantity row) in sync
+  // since only one is ever visible at a time but either could be the one submitted.
+  deltaUnit.addEventListener('change', () => { setUnit.value = deltaUnit.value; });
+  setUnit.addEventListener('change', () => { deltaUnit.value = setUnit.value; });
+
+  function setInvalid(fieldName, invalid) {
+    const el = form.querySelector('[data-field="' + fieldName + '"]');
+    if (!el) return;
+    el.classList.toggle('invalid', invalid);
+  }
+
+  function validate() {
+    let valid = true;
+
+    const nameVal = itemNameInput.value.trim();
+    setInvalid('itemName', !nameVal);
+    if (!nameVal) valid = false;
+
+    if (itemType === 'bulk') {
+      setInvalid('bulkStatus', !bulkStatus);
+      if (!bulkStatus) valid = false;
+    } else {
+      const actionVal = actionSelect.value;
+      setInvalid('action', !actionVal);
+      if (!actionVal) valid = false;
+
+      if (actionVal === 'add' || actionVal === 'checkout') {
+        const n = Number(quantityDeltaInput.value);
+        const bad = !quantityDeltaInput.value || !Number.isFinite(n) || n <= 0;
+        setInvalid('quantityDelta', bad);
+        if (bad) valid = false;
+      } else if (actionVal === 'set') {
+        const n = Number(quantityInput.value);
+        const bad = quantityInput.value === '' || !Number.isFinite(n) || n < 0;
+        setInvalid('quantity', bad);
+        if (bad) valid = false;
+      }
     }
-    sheet.getRange(sheetRow, COL.Quantity).setValue(newQty);
+
+    const subteamVal = subteamInput.value.trim();
+    setInvalid('subteam', !subteamVal);
+    if (!subteamVal) valid = false;
+
+    const submittedByVal = submittedByInput.value.trim();
+    setInvalid('submittedBy', !submittedByVal);
+    if (!submittedByVal) valid = false;
+
+    return valid;
   }
 
-  // ---- Subteam jurisdiction (merge, dedupe) ----
-  if (body.subteam) {
-    const existing = String(sheet.getRange(sheetRow, COL.Subteams).getValue() || '');
-    const set = new Set(existing.split(',').map(s => s.trim()).filter(Boolean));
-    set.add(body.subteam.trim());
-    sheet.getRange(sheetRow, COL.Subteams).setValue(Array.from(set).join(','));
+  function showStatus(kind, message) {
+    statusEl.className = 'status show ' + kind;
+    statusEl.textContent = message;
   }
 
-  // ---- Image (optional) ----
-  if (body.image) {
-    sheet.getRange(sheetRow, COL.ImageBase64).setValue(body.image);
-  }
+  const BULK_CODE = { out: 0, low: 1, enough: 2 };
 
-  // ---- Metadata ----
-  sheet.getRange(sheetRow, COL.LastUpdated).setValue(new Date());
-  if (body.submittedBy) sheet.getRange(sheetRow, COL.LastUpdatedBy).setValue(body.submittedBy);
-  if (body.notes) sheet.getRange(sheetRow, COL.Notes).setValue(body.notes);
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
 
-  // ---- Low stock check (type-aware) ----
-  const itemName = sheet.getRange(sheetRow, COL.ItemName).getValue();
-  if (itemType === 'bulk') {
-    if (bulkStatus === 'out' || bulkStatus === 'low') {
-      flagLowStock(itemName, `marked ${bulkStatus.toUpperCase()}`);
+    if (!validate()) {
+      showStatus('err', 'Fix the highlighted fields — nothing was sent.');
+      return;
     }
-  } else {
-    const threshold = Number(sheet.getRange(sheetRow, COL.LowStockThreshold).getValue()) || 0;
-    if (threshold > 0 && newQty <= threshold) {
-      const unit = sheet.getRange(sheetRow, COL.Unit).getValue();
-      const unitLabel = unit ? ` ${unit}` : '';
-      flagLowStock(itemName, `at ${newQty}${unitLabel}, at or below its threshold of ${threshold}${unitLabel}`);
+
+    const payload = {
+      itemName: itemNameInput.value.trim(),
+      itemType: itemType,
+      subteam: subteamInput.value.trim(),
+      submittedBy: submittedByInput.value.trim()
+    };
+
+    if (itemType === 'bulk') {
+      payload.action = 'set';
+      payload.stockStatus = bulkStatus;
+      payload.quantity = BULK_CODE[bulkStatus];
+    } else {
+      const action = actionSelect.value;
+      payload.action = action;
+      if (itemType === 'wire') payload.unit = action === 'set' ? setUnit.value : deltaUnit.value;
+      if (action === 'add' || action === 'checkout') {
+        payload.quantityDelta = Number(quantityDeltaInput.value);
+      } else if (action === 'set') {
+        payload.quantity = Number(quantityInput.value);
+      }
+      const threshold = document.getElementById('lowStockThreshold').value;
+      if (threshold !== '') payload.lowStockThreshold = Number(threshold);
     }
-  }
 
-  return {
-    itemName: body.itemName,
-    itemType: itemType,
-    newQuantity: newQty,
-    stockStatus: bulkStatus
-  };
-}
+    const notes = notesInput.value.trim();
+    if (notes) payload.notes = notes;
 
-// ====== HELPERS ======
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Sending…';
+    showStatus('pending', 'Sending request…');
 
-function normalizeItemType(rawType) {
-  const t = String(rawType || '').trim().toLowerCase();
-  if (t === 'length') return 'wire'; // backwards-compat with the old type name
-  return ITEM_TYPES.includes(t) ? t : DEFAULT_ITEM_TYPE;
-}
+    try {
+      const res = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight against Apps Script
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
 
-function getSheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAME);
-    sheet.appendRow(HEADERS);
-  }
-  return sheet;
-}
+      if (data.ok) {
+        const resultText = itemType === 'bulk'
+          ? 'Done — ' + payload.itemName + ' is now marked ' + bulkStatus.toUpperCase() + '.'
+          : 'Done — ' + payload.itemName + ' is now at ' + data.result.newQuantity + (itemType === 'wire' ? (' ' + (payload.unit || '')) : '') + '.';
+        showStatus('ok', resultText);
 
-function rowToObject(headers, row) {
-  const obj = {};
-  headers.forEach((h, i) => obj[h] = row[i]);
-  return obj;
-}
+        form.reset();
+        selectType('countable');
+        actionSelect.value = 'set';
+        bulkStatus = null;
+        [...bulkPills.children].forEach(p => p.classList.remove('active'));
+        document.getElementById('lowStockThreshold').value = '0';
+        subteamInput.value = 'Fab';
+        updateFormMode();
+      } else {
+        showStatus('err', 'Server rejected the request: ' + (data.error || 'unknown error'));
+      }
+    } catch (err) {
+      showStatus('err', 'Request failed to send: ' + err.message + '. Check your connection and the endpoint URL.');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Send Request';
+    }
+  });
 
-function jsonResponse(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-function flagLowStock(itemName, detailText) {
-  // Log to an Alerts sheet so there's a running history, and email the team.
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let alerts = ss.getSheetByName(ALERTS_SHEET_NAME);
-  if (!alerts) {
-    alerts = ss.insertSheet(ALERTS_SHEET_NAME);
-    alerts.appendRow(['Timestamp', 'ItemName', 'Detail']);
-  }
-  alerts.appendRow([new Date(), itemName, detailText]);
-
-  if (ALERT_EMAILS.length) {
-    MailApp.sendEmail({
-      to: ALERT_EMAILS.join(','),
-      subject: `Low stock: ${itemName}`,
-      body: `${itemName} is ${detailText}.`
-    });
-  }
-}
+  updateFormMode();
+</script>
+</body>
+</html>
