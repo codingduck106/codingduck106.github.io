@@ -355,8 +355,14 @@
       <div class="row2">
         <div class="field" data-field="subteam">
           <label for="subteam">Subteam <span class="req">*</span></label>
-          <input type="text" id="subteam" placeholder="e.g. Electrical" value="Fab">
-          <div class="error-text">Enter a subteam.</div>
+          <select id="subteam">
+            <option value="Fabrication">Fabrication</option>
+            <option value="Electrical">Electrical</option>
+            <option value="Software">Software</option>
+            <option value="Media">Media</option>
+            <option value="Outreach">Outreach</option>
+          </select>
+          <div class="error-text">Choose a subteam.</div>
         </div>
         <div class="field" data-field="submittedBy">
           <label for="submittedBy">Your Name <span class="req">*</span></label>
@@ -378,6 +384,7 @@
 
 <script>
   const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyZnppGQxiVdUF9gWkps2n_BH0yrcriiSiV7tSTQr98qgWOkfIz_fUSfPkhIIwB3vK7/exec';
+  const LAST_SUBTEAM_KEY = 'team2813_inventory_last_subteam';
 
   const TYPE_HINTS = {
     countable: 'Discrete items you count one by one — gears, sensors, connectors, standoffs, motors.',
@@ -404,6 +411,19 @@
   const thresholdField = document.getElementById('thresholdField');
 
   const subteamInput = document.getElementById('subteam');
+
+  function loadLastSubteam() {
+    try { return localStorage.getItem(LAST_SUBTEAM_KEY); } catch (e) { return null; }
+  }
+  function saveLastSubteam(value) {
+    try { localStorage.setItem(LAST_SUBTEAM_KEY, value); } catch (e) { /* storage unavailable, ignore */ }
+  }
+
+  // Restore the last subteam picked on this device, if any.
+  const savedSubteam = loadLastSubteam();
+  if (savedSubteam) subteamInput.value = savedSubteam;
+
+  subteamInput.addEventListener('change', () => saveLastSubteam(subteamInput.value));
   const submittedByInput = document.getElementById('submittedBy');
   const notesInput = document.getElementById('notes');
   const statusEl = document.getElementById('status');
@@ -577,7 +597,7 @@
         bulkStatus = null;
         [...bulkPills.children].forEach(p => p.classList.remove('active'));
         document.getElementById('lowStockThreshold').value = '0';
-        subteamInput.value = 'Fab';
+        subteamInput.value = loadLastSubteam() || 'Fabrication';
         updateFormMode();
       } else {
         showStatus('err', 'Server rejected the request: ' + (data.error || 'unknown error'));
